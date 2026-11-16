@@ -1,0 +1,16 @@
+# Simulation outputs
+sim/out/
+*.vvp
+*.vcd
+# Quartus build outputs
+db/
+incremental_db/
+output_files/
+*.qws
+*.rpt
+*.summary
+*.smsg
+*.done
+*.jdi
+*.sld
+__pycache__/
