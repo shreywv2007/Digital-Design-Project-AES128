@@ -1,0 +1,4 @@
+# Quartus Prime project for the AES-128 FPGA design (DE10-Lite).
+# Open this file in Quartus Prime Lite: File > Open Project > aes128.qpf
+QUARTUS_VERSION = "20.1"
+PROJECT_REVISION = "aes128"

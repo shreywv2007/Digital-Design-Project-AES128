@@ -5,7 +5,7 @@
 |---|---|
 | `rtl/top/aes_top.v` | Top-level design: UART (Member 3) → controller → key expansion + encrypt (Member 1) / decrypt (Member 2) → UART reply |
 | `rtl/top/de10_lite_top.v` | DE10-Lite board wrapper: 50 MHz clock, KEY0 = reset, LEDs, UART on GPIO[0]/GPIO[1] |
-| `constraints/de10_lite_pins.tcl` | Quartus pin assignments (check against the DE10-Lite manual) |
+| `quartus/aes128.qpf`, `quartus/aes128.qsf` | Quartus project: device, source files, pin assignments (check pins against the DE10-Lite manual) |
 | `constraints/de10_lite.sdc` | 50 MHz timing constraint |
 | `tb/tb_aes_cores.v` | Unit tests: key expansion, encrypt, decrypt (FIPS-197 vectors + round trips + reset) |
 | `tb/tb_aes_top.v` | Whole-system test over the real UART pins, acting like the host script |

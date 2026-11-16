@@ -5,7 +5,7 @@
 // KEY[0] (push button, active low) = reset. Press it after a partial request.
 // LEDR[0] = busy, LEDR[1] = last request had an invalid command.
 // LEDR[9] blinks about once a second to show the design is running.
-// Pin numbers are in constraints/de10_lite_pins.tcl.
+// Pin numbers are in quartus/aes128.qsf.
 module de10_lite_top (
     input  wire       MAX10_CLK1_50,
     input  wire [1:0] KEY,
