@@ -4,58 +4,37 @@
 // Response (19 bytes): 5A A5 STATUS RESULT[16]
 //   STATUS 00 = success, 01 = invalid command (result is all zero).
 //
-// Controller flow (one request at a time, no queue):
-//   IDLE    : wait for packet_valid (capture cmd/key/data) or packet_error.
-//   EXPAND  : register the 11 round keys from the shared key expansion so
-//             they stay stable while the core is busy (both cores need this).
-//   START   : one-clock start pulse to the selected core.
-//   RUN     : wait for that core's done pulse, capture its output.
-//   RESPOND : pulse response_start once the sender is idle.
-//   WAIT_TX : wait for response_done (all 19 bytes sent), then back to IDLE.
-// packet_valid / packet_error arriving outside IDLE are ignored (the host
-// protocol allows only one outstanding request).
+// Block diagram:
+//   uart_interface (Member 3) --packet--> input_registers --> aes_key_expansion
+//          ^                                   |                  |
+//          |                                   v                  v
+//   output_registers <-- mode_selector <-- aes_encrypt (Member 1) / aes_decrypt (Member 2)
+//                aes_controller sequences every step; status_leds shows state.
 //
 // reset is synchronous and active high. Byte 0 of every block is [127:120].
 module aes_top #(
-    parameter integer CLK_FREQ_HZ = 50000000,
-    parameter integer BAUD_RATE   = 115200
+    parameter integer CLK_FREQ_HZ    = 50000000,
+    parameter integer BAUD_RATE      = 115200,
+    parameter integer HEARTBEAT_BITS = 26
 )(
-    input  wire clk,
-    input  wire reset,
-    input  wire uart_rx_pin,
-    output wire uart_tx_pin,
-    output wire busy_led,     // high while a request is being processed
-    output reg  error_led     // set by an invalid command, cleared by next valid one
+    input  wire        clk,
+    input  wire        reset,
+    input  wire        uart_rx_pin,
+    output wire        uart_tx_pin,
+    output wire        busy_led,       // request in progress
+    output wire        error_led,      // last request had an invalid command
+    output wire        done_led,       // last request finished successfully
+    output wire        heartbeat_led,  // blinks while the design runs
+    output wire [23:0] display_value,  // first 3 bytes of the last result
+    output wire        display_blank   // no successful result to show yet
 );
-    localparam [7:0] CMD_ENCRYPT = 8'h01;
-    localparam [7:0] CMD_DECRYPT = 8'h02;
-    localparam [7:0] STATUS_OK          = 8'h00;
-    localparam [7:0] STATUS_BAD_COMMAND = 8'h01;
-
-    localparam [2:0] S_IDLE    = 3'd0;
-    localparam [2:0] S_EXPAND  = 3'd1;
-    localparam [2:0] S_START   = 3'd2;
-    localparam [2:0] S_RUN     = 3'd3;
-    localparam [2:0] S_RESPOND = 3'd4;
-    localparam [2:0] S_WAIT_TX = 3'd5;
-
-    // ---------------- UART side ----------------
+    // ---------------- UART (Member 3) ----------------
     wire [7:0]   rx_command;
-    wire [127:0] rx_key;
-    wire [127:0] rx_data;
-    wire         packet_valid;
-    wire         packet_error;
-    wire         response_start;
-    wire         response_busy;
-    wire         response_done;
-
-    reg  [2:0]   state;
-    reg  [7:0]   cmd_reg;
-    reg  [127:0] key_reg;
-    reg  [127:0] data_reg;
-    reg  [1407:0] round_keys_reg;
-    reg  [7:0]   status_reg;
-    reg  [127:0] result_reg;
+    wire [127:0] rx_key, rx_data;
+    wire         packet_valid, packet_error;
+    wire [7:0]   status;
+    wire [127:0] result;
+    wire         response_start, response_busy, response_done;
 
     uart_interface #(
         .CLK_FREQ_HZ(CLK_FREQ_HZ), .BAUD_RATE(BAUD_RATE)
@@ -64,93 +43,86 @@ module aes_top #(
         .uart_rx_pin(uart_rx_pin), .uart_tx_pin(uart_tx_pin),
         .command(rx_command), .key(rx_key), .data(rx_data),
         .packet_valid(packet_valid), .packet_error(packet_error),
-        .status(status_reg), .result(result_reg),
+        .status(status), .result(result),
         .response_start(response_start),
         .response_busy(response_busy), .response_done(response_done)
     );
 
-    // ---------------- AES side ----------------
-    wire [1407:0] round_keys_comb;
-    wire [127:0]  enc_out, dec_out;
-    wire          enc_busy, enc_done, dec_busy, dec_done;
-    wire          is_encrypt = (cmd_reg == CMD_ENCRYPT);
+    // ---------------- Controller ----------------
+    wire load_inputs, expand_keys, core_start;
+    wire capture_result, capture_error, busy;
+    wire core_done;
 
-    aes_key_expansion u_key_expansion (
-        .key(key_reg), .round_keys(round_keys_comb)
+    aes_controller u_controller (
+        .clk(clk), .reset(reset),
+        .packet_valid(packet_valid), .packet_error(packet_error),
+        .core_done(core_done),
+        .response_busy(response_busy), .response_done(response_done),
+        .load_inputs(load_inputs), .expand_keys(expand_keys),
+        .core_start(core_start),
+        .capture_result(capture_result), .capture_error(capture_error),
+        .response_start(response_start), .busy(busy)
     );
 
-    aes_encrypt u_encrypt (
+    // ---------------- Input side ----------------
+    wire [7:0]    command;
+    wire [127:0]  key, data;
+    wire [1407:0] round_keys_comb, round_keys;
+
+    input_registers u_input_registers (
         .clk(clk), .reset(reset),
-        .start((state == S_START) && is_encrypt),
-        .data_in(data_reg), .round_keys(round_keys_reg),
+        .load(load_inputs),
+        .command_in(rx_command), .key_in(rx_key), .data_in(rx_data),
+        .expand(expand_keys), .round_keys_in(round_keys_comb),
+        .command(command), .key(key), .data(data), .round_keys(round_keys)
+    );
+
+    aes_key_expansion u_key_expansion (          // Member 1 (shared)
+        .key(key), .round_keys(round_keys_comb)
+    );
+
+    // ---------------- AES cores ----------------
+    wire         enc_start, dec_start, is_encrypt;
+    wire [127:0] enc_out, dec_out, core_result;
+    wire         enc_busy, enc_done, dec_busy, dec_done;
+
+    mode_selector u_mode_selector (
+        .command(command), .start(core_start),
+        .enc_result(enc_out), .enc_done(enc_done),
+        .dec_result(dec_out), .dec_done(dec_done),
+        .is_encrypt(is_encrypt),
+        .enc_start(enc_start), .dec_start(dec_start),
+        .core_done(core_done), .core_result(core_result)
+    );
+
+    aes_encrypt u_encrypt (                       // Member 1
+        .clk(clk), .reset(reset), .start(enc_start),
+        .data_in(data), .round_keys(round_keys),
         .data_out(enc_out), .busy(enc_busy), .done(enc_done)
     );
 
-    aes_decrypt u_decrypt (
-        .clk(clk), .rst(reset),
-        .start((state == S_START) && !is_encrypt),
-        .ciphertext(data_reg), .round_keys(round_keys_reg),
+    aes_decrypt u_decrypt (                       // Member 2
+        .clk(clk), .rst(reset), .start(dec_start),
+        .ciphertext(data), .round_keys(round_keys),
         .plaintext(dec_out), .busy(dec_busy), .done(dec_done)
     );
 
-    assign response_start = (state == S_RESPOND) && !response_busy;
-    assign busy_led       = (state != S_IDLE);
+    // ---------------- Output side ----------------
+    output_registers u_output_registers (
+        .clk(clk), .reset(reset),
+        .capture_result(capture_result), .capture_error(capture_error),
+        .core_result(core_result),
+        .status(status), .result(result)
+    );
 
-    // ---------------- Controller ----------------
-    always @(posedge clk) begin
-        if (reset) begin
-            state          <= S_IDLE;
-            cmd_reg        <= 8'h00;
-            key_reg        <= 128'h0;
-            data_reg       <= 128'h0;
-            round_keys_reg <= 1408'h0;
-            status_reg     <= STATUS_OK;
-            result_reg     <= 128'h0;
-            error_led      <= 1'b0;
-        end else begin
-            case (state)
-                S_IDLE: begin
-                    if (packet_valid) begin
-                        cmd_reg   <= rx_command;
-                        key_reg   <= rx_key;
-                        data_reg  <= rx_data;
-                        error_led <= 1'b0;
-                        state     <= S_EXPAND;
-                    end else if (packet_error) begin
-                        status_reg <= STATUS_BAD_COMMAND;
-                        result_reg <= 128'h0;
-                        error_led  <= 1'b1;
-                        state      <= S_RESPOND;
-                    end
-                end
-                S_EXPAND: begin
-                    round_keys_reg <= round_keys_comb;
-                    state          <= S_START;
-                end
-                S_START: begin
-                    state <= S_RUN;   // start pulse is driven combinationally above
-                end
-                S_RUN: begin
-                    if (is_encrypt && enc_done) begin
-                        result_reg <= enc_out;
-                        status_reg <= STATUS_OK;
-                        state      <= S_RESPOND;
-                    end else if (!is_encrypt && dec_done) begin
-                        result_reg <= dec_out;
-                        status_reg <= STATUS_OK;
-                        state      <= S_RESPOND;
-                    end
-                end
-                S_RESPOND: begin
-                    if (!response_busy)
-                        state <= S_WAIT_TX;
-                end
-                S_WAIT_TX: begin
-                    if (response_done)
-                        state <= S_IDLE;
-                end
-                default: state <= S_IDLE;
-            endcase
-        end
-    end
+    status_leds #(.HEARTBEAT_BITS(HEARTBEAT_BITS)) u_status_leds (
+        .clk(clk), .reset(reset), .busy(busy),
+        .request_start(load_inputs), .request_error(capture_error),
+        .result_ready(capture_result),
+        .led_busy(busy_led), .led_error(error_led),
+        .led_done(done_led), .led_heartbeat(heartbeat_led)
+    );
+
+    assign display_value = result[127:104];
+    assign display_blank = !done_led;
 endmodule

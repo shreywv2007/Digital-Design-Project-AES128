@@ -1,4 +1,4 @@
-# Compile and run both testbenches with Icarus Verilog.
+# Compile and run all testbenches with Icarus Verilog.
 # Usage (from the repo root):  powershell -ExecutionPolicy Bypass -File sim\run_sim.ps1
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -14,7 +14,7 @@ $rtl = @(Get-ChildItem rtl -Recurse -Filter *.v |
 New-Item -ItemType Directory -Force sim\out | Out-Null
 
 $failed = $false
-foreach ($tb in "tb_aes_cores", "tb_aes_top") {
+foreach ($tb in "tb_aes_encrypt", "tb_aes_decrypt", "tb_aes_cores", "tb_uart", "tb_aes_top") {
     Write-Host "=== $tb ===" -ForegroundColor Cyan
     & $iverilog -g2005 -Wall -Wno-timescale -o "sim\out\$tb.vvp" -s $tb "tb\$tb.v" @rtl
     if ($LASTEXITCODE -ne 0) { $failed = $true; continue }
