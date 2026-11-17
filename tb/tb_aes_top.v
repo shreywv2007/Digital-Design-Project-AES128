@@ -14,15 +14,31 @@ module tb_aes_top;
     reg  reset = 1'b1;
     reg  host_tx = 1'b1;           // -> DUT uart_rx_pin (idle high)
     wire dut_tx;                   // <- DUT uart_tx_pin
-    wire busy_led, error_led;
+    wire busy_led, error_led, done_led, heartbeat_led, display_blank;
+    wire [23:0] display_value;
 
     always #(CLK_NS/2) clk = ~clk;
 
-    aes_top #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .BAUD_RATE(BAUD_RATE)) dut (
+    aes_top #(.CLK_FREQ_HZ(CLK_FREQ_HZ), .BAUD_RATE(BAUD_RATE), .HEARTBEAT_BITS(8)) dut (
         .clk(clk), .reset(reset),
         .uart_rx_pin(host_tx), .uart_tx_pin(dut_tx),
-        .busy_led(busy_led), .error_led(error_led)
+        .busy_led(busy_led), .error_led(error_led), .done_led(done_led),
+        .heartbeat_led(heartbeat_led),
+        .display_value(display_value), .display_blank(display_blank)
     );
+
+    // 7-segment decoder on the same signals the board uses
+    wire [7:0] hex0, hex1, hex2, hex3, hex4, hex5;
+    seven_segment_display u_display (
+        .value(display_value), .blank(display_blank),
+        .hex0(hex0), .hex1(hex1), .hex2(hex2), .hex3(hex3), .hex4(hex4), .hex5(hex5)
+    );
+
+    reg heartbeat_seen_high = 1'b0, heartbeat_seen_low = 1'b0;
+    always @(posedge clk) if (!reset) begin
+        if (heartbeat_led)  heartbeat_seen_high <= 1'b1;
+        if (!heartbeat_led) heartbeat_seen_low  <= 1'b1;
+    end
 
     integer errors = 0;
     integer checks = 0;
@@ -146,11 +162,18 @@ module tb_aes_top;
         repeat (5) @(posedge clk);
         reset = 1'b0;
         #(BIT_NS * 4);
+        check_flag("display blank before any result", display_blank, 1'b1);
+        check_flag("all segments off when blank", (hex0 & hex1 & hex2 & hex3 & hex4 & hex5) == 8'hFF, 1'b1);
 
         // 1. FIPS-197 C.1 encrypt
         transact(8'h01, 128'h000102030405060708090a0b0c0d0e0f,
                         128'h00112233445566778899aabbccddeeff);
         expect_response("UART encrypt (C.1)", 8'h00, 128'h69c4e0d86a7b0430d8cdb78070b4c55a);
+        check_flag("done LED on after result", done_led, 1'b1);
+        check_flag("display value = 69C4E0", display_value == 24'h69c4e0, 1'b1);
+        // active-low {dp,g..a}: 6 = 82, 9 = 90, C = C6, 4 = 99, E = 86, 0 = C0
+        check_flag("7-seg digits spell 69C4E0",
+                   {hex5, hex4, hex3, hex2, hex1, hex0} == 48'h8290_C699_86C0, 1'b1);
 
         // 2. FIPS-197 C.1 decrypt
         transact(8'h02, 128'h000102030405060708090a0b0c0d0e0f,
@@ -182,6 +205,7 @@ module tb_aes_top;
         transact(8'h01, 128'h000102030405060708090a0b0c0d0e0f,
                         128'h00112233445566778899aabbccddeeff);
         expect_response("encrypt after junk bytes", 8'h00, 128'h69c4e0d86a7b0430d8cdb78070b4c55a);
+        check_flag("heartbeat LED toggles", heartbeat_seen_high && heartbeat_seen_low, 1'b1);
 
         $display("----------------------------------------");
         if (errors == 0) $display("ALL %0d SYSTEM CHECKS PASSED", checks);
